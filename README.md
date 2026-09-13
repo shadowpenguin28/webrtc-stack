@@ -1,0 +1,1 @@
+Do not commit go binaries pls.

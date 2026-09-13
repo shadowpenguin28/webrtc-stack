@@ -1,0 +1,6 @@
+port = 8080
+allowed_origins = ["*"]
+
+[viewer_policy]
+max_viewers_per_node=1
+

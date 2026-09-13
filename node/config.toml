@@ -1,0 +1,28 @@
+node_id = "simulated-pi-a"
+label = "Webcam 720p"
+node_type = "camera"
+signaling_url = "ws://localhost:8080/ws"
+
+[webrtc]
+# Omit these initially; set them only when firewall testing requires a fixed range.
+# udp_port_min = 50000
+# udp_port_max = 50100
+
+[video]
+codec = "h264"
+fps = 30
+bitrate = 2000000
+keyframe_interval_frames = 30
+
+[ffmpeg]
+# Real camera on /dev/video4 — MJPG input at 1080p30, re-encode to H.264 Baseline
+arguments = [
+  "-f", "v4l2", "-input_format", "mjpeg",
+  "-framerate", "30", "-video_size", "1920x1080",
+  "-i", "/dev/video4",
+  "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+  "-profile:v", "baseline", "-level", "4.1",
+  "-pix_fmt", "yuv420p",
+  "-x264-params", "repeat-headers=1:keyint=30:min-keyint=30:aud=1",
+  "-b:v", "1500k", "-maxrate", "2000k", "-bufsize", "2000k", "-f", "h264", "pipe:1"
+]
