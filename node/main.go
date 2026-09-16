@@ -146,7 +146,33 @@ func handleSession(ctx context.Context, config Config, sigClient *signaling.Clie
 	}()
 
 	// Start the video pipeline
-	source := pipeline.NewTestPatternSource(config.FFmpeg.Arguments, config.Video.FPS)
+	var source pipeline.VideoSource
+	if config.Stitch.Enabled && len(config.Stitch.Cameras) > 0 {
+		// Multi-camera stitched mode
+		stitchCfg := pipeline.StitchConfig{
+			CanvasWidth:  config.Stitch.CanvasWidth,
+			CanvasHeight: config.Stitch.CanvasHeight,
+			Encoder:      config.Stitch.Encoder,
+			FPS:          config.Video.FPS,
+			Bitrate:      config.Stitch.Bitrate,
+		}
+		for _, cam := range config.Stitch.Cameras {
+			stitchCfg.Cameras = append(stitchCfg.Cameras, pipeline.CameraInput{
+				Device:      cam.Device,
+				Label:       cam.Label,
+				InputFormat: cam.InputFormat,
+				Width:       cam.Width,
+				Height:      cam.Height,
+			})
+		}
+		source = pipeline.NewStitchedSource(stitchCfg)
+		log.Printf("session: using stitched pipeline (%d cameras)", len(config.Stitch.Cameras))
+	} else {
+		// Single-camera mode
+		source = pipeline.NewCameraSource(config.FFmpeg.Arguments, config.Video.FPS)
+		log.Printf("session: using single-camera pipeline")
+	}
+
 	frameDuration := time.Second / time.Duration(config.Video.FPS)
 
 	wg.Add(1)

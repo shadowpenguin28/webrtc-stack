@@ -17,12 +17,84 @@ keyframe_interval_frames = 30
 [ffmpeg]
 # Real camera on /dev/video4 — MJPG input at 1080p30, re-encode to H.264 Baseline
 arguments = [
-  "-f", "v4l2", "-input_format", "mjpeg",
-  "-framerate", "30", "-video_size", "1920x1080",
-  "-i", "/dev/video4",
-  "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-  "-profile:v", "baseline", "-level", "4.1",
-  "-pix_fmt", "yuv420p",
-  "-x264-params", "repeat-headers=1:keyint=30:min-keyint=30:aud=1",
-  "-b:v", "1500k", "-maxrate", "2000k", "-bufsize", "2000k", "-f", "h264", "pipe:1"
+  "-f",
+  "v4l2",
+  "-input_format",
+  "mjpeg",
+  "-framerate",
+  "30",
+  "-video_size",
+  "1920x1080",
+  "-i",
+  "/dev/video0",
+  "-c:v",
+  "libx264",
+  "-preset",
+  "ultrafast",
+  "-tune",
+  "zerolatency",
+  "-profile:v",
+  "baseline",
+  "-level",
+  "4.1",
+  "-pix_fmt",
+  "yuv420p",
+  "-x264-params",
+  "repeat-headers=1:keyint=30:min-keyint=30:aud=1",
+  "-b:v",
+  "1500k",
+  "-maxrate",
+  "2000k",
+  "-bufsize",
+  "2000k",
+  "-f",
+  "h264",
+  "pipe:1",
 ]
+
+# ── Multi-camera stitching ────────────────────────────────────────────
+# When enabled, the node uses the stitch pipeline instead of [ffmpeg].
+# 5 cameras at 640×480 composited into a 3×2 grid on a 1920×1080 canvas
+# (6th slot is black, 60px letterbox top/bottom).
+
+[stitch]
+enabled = true
+canvas_width = 1920
+canvas_height = 1080
+encoder = "h264"
+bitrate = "1500k"
+
+[[stitch.cameras]]
+device = "/dev/video0"
+label = "front"
+input_format = "mjpeg"
+width = 640
+height = 480
+
+[[stitch.cameras]]
+device = "/dev/video4"
+label = "front-right"
+input_format = "mjpeg"
+width = 640
+height = 480
+
+# [[stitch.cameras]]
+# device = "/dev/video2"
+# label = "right"
+# input_format = "mjpeg"
+# width = 640
+# height = 480
+#
+# [[stitch.cameras]]
+# device = "/dev/video3"
+# label = "rear"
+# input_format = "mjpeg"
+# width = 640
+# height = 480
+#
+# [[stitch.cameras]]
+# device = "/dev/video4"
+# label = "left"
+# input_format = "mjpeg"
+# width = 640
+# height = 480
