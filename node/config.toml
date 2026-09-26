@@ -1,100 +1,154 @@
-node_id = "simulated-pi-a"
-label = "Webcam 720p"
-node_type = "camera"
-signaling_url = "ws://localhost:8080/ws"
+# ═══════════════════════════════════════════════════════════════════════
+# Rover Node Configuration
+# ═══════════════════════════════════════════════════════════════════════
 
+node_id = "crissrpi"
+label = "Webcams"
+node_type = "camera"
+signaling_url = "ws://192.168.1.100:8080/ws"
+
+# ── WebRTC ─────────────────────────────────────────────────────────────
+# Optional UDP port range for ICE candidates.
+# Useful when a firewall requires a fixed range. Omit to let the OS pick.
 [webrtc]
-# Omit these initially; set them only when firewall testing requires a fixed range.
 # udp_port_min = 50000
 # udp_port_max = 50100
 
+# ── Video ──────────────────────────────────────────────────────────────
+# General video parameters used by both single-camera and stitch modes.
 [video]
 codec = "h264"
 fps = 30
 bitrate = 2000000
 keyframe_interval_frames = 30
 
+# ── Single-Camera Mode ────────────────────────────────────────────────
+# Used when stitch.enabled = false. Captures from one camera device.
+#
+# To switch encoders, change "encoder" and comment/uncomment the
+# preset/tune/profile/maxrate/bufsize lines. Hardware encoders like
+# h264_v4l2m2m ignore those options — they only use bitrate.
 [ffmpeg]
-# Real camera on /dev/video4 — MJPG input at 1080p30, re-encode to H.264 Baseline
-arguments = [
-  "-f",
-  "v4l2",
-  "-input_format",
-  "mjpeg",
-  "-framerate",
-  "30",
-  "-video_size",
-  "1920x1080",
-  "-i",
-  "/dev/video0",
-  "-c:v",
-  "libx264",
-  "-preset",
-  "ultrafast",
-  "-tune",
-  "zerolatency",
-  "-profile:v",
-  "baseline",
-  "-level",
-  "4.1",
-  "-pix_fmt",
-  "yuv420p",
-  "-x264-params",
-  "repeat-headers=1:keyint=30:min-keyint=30:aud=1",
-  "-b:v",
-  "1500k",
-  "-maxrate",
-  "2000k",
-  "-bufsize",
-  "2000k",
-  "-f",
-  "h264",
-  "pipe:1",
-]
+device = "/dev/video0"
 
-# ── Multi-camera stitching ────────────────────────────────────────────
-# When enabled, the node uses the stitch pipeline instead of [ffmpeg].
-# 5 cameras at 640×480 composited into a 3×2 grid on a 1920×1080 canvas
-# (6th slot is black, 60px letterbox top/bottom).
+# Input format requested from the camera driver.
+# Options: "mjpeg" (compressed, lower USB bandwidth — recommended)
+#          "yuyv422" (raw, higher quality but ~10x more bandwidth)
+input_format = "mjpeg"
+
+# Capture resolution. Must be supported by the camera.
+# Check available modes: v4l2-ctl --list-formats-ext -d /dev/video0
+capture_width = 1920
+capture_height = 1080
+
+# H.264 encoder selection.
+# Options:
+#   "h264_v4l2m2m"  — Raspberry Pi hardware encoder (VideoCore).
+#                     Very low CPU. Ignores preset/tune/profile/maxrate/bufsize.
+#   "libx264"       — Software encoder. Works on any platform.
+#                     High CPU on Pi. Uses preset/tune/profile/maxrate/bufsize.
+#   "h264"          — Alias for libx264 in most ffmpeg builds.
+encoder = "libx264"
+
+# ── libx264-only options (ignored by h264_v4l2m2m) ──────────────────
+# Encoding speed. Faster = lower CPU but larger file/lower quality.
+# Options: "ultrafast" "superfast" "veryfast" "faster" "fast"
+#          "medium" "slow" "slower" "veryslow"
+preset = "ultrafast"
+
+# Content optimization.
+# Options: "zerolatency" (live streaming — no B-frames, minimal latency)
+#          "film" "animation" "grain" "stillimage"
+tune = "zerolatency"
+
+# H.264 profile for decoder compatibility.
+# Options: "baseline" (widest compat, no B-frames — best for WebRTC)
+#          "main" (B-frames allowed)
+#          "high" (best compression)
+profile = "baseline"
+
+# Bitrate control.
+bitrate = "1500k"
+
+# Max instantaneous bitrate (VBV ceiling). Should be >= bitrate.
+# Only used with libx264. Leave empty for h264_v4l2m2m.
+maxrate = "2000k"
+
+# VBV buffer size. Controls how strictly CBR is enforced.
+# Smaller = stricter CBR = less bitrate spikes.
+# Only used with libx264. Leave empty for h264_v4l2m2m.
+bufsize = "2000k"
+
+# V4L2 read buffer depth. Decouples camera reading from encoding.
+# Higher = more resilient to brief encoder stalls.
+# Range: 8–4096. Default: 512.
+thread_queue_size = 8
+
+
+# ── Multi-Camera Stitching ────────────────────────────────────────────
+# When enabled, composites multiple cameras into a single grid output
+# using ffmpeg's xstack filter. Overrides [ffmpeg] section.
+#
+# Grid layout adapts automatically:
+#   1 camera  → 1×1 (full canvas)
+#   2 cameras → 2×1 (side by side)
+#   3–4 cameras → 2×2
+#   5–6 cameras → 3×2
 
 [stitch]
 enabled = true
-canvas_width = 1920
-canvas_height = 1080
-encoder = "h264"
+
+# Canvas size: set to 0 (or omit) to auto-compute from camera count.
+# Auto-compute maximises per-camera resolution for fewer cameras:
+#   1 cam  → cam_w × cam_h        (e.g. 640×480,  no scaling)
+#   2 cams → 2×cam_w × cam_h      (e.g. 1280×480, no scaling)
+#   3-4    → 2×cam_w × 2×cam_h    (e.g. 1280×960, no scaling)
+#   5-6    → 1920×1080             (minimal vertical padding per cell)
+# Set explicit non-zero values to override.
+canvas_width = 0
+canvas_height = 0
+
+# Encoder for the stitched output. Same options as [ffmpeg].encoder above.
+# On Raspberry Pi, use "h264_v4l2m2m" for hardware encoding.
+# On desktop/x86, use "libx264".
+encoder = "h264_v4l2m2m"
 bitrate = "1500k"
+
+# V4L2 per-camera read buffer depth. Same as [ffmpeg].thread_queue_size.
+thread_queue_size = 8
+
+# ── libx264-only stitch options (ignored by h264_v4l2m2m) ────────────
+# Uncomment these if using encoder = "libx264" for stitching.
+# preset = "ultrafast"
+# tune = "zerolatency"
+# profile = "baseline"
+# maxrate = "2000k"
+# bufsize = "150k"
+
+# ── Camera definitions ────────────────────────────────────────────────
+# Each camera needs: device path, label, input format, and resolution.
+# input_format: "mjpeg" (recommended) or "yuyv422" (raw)
+# Check available devices: ls /dev/video*
+# Check camera capabilities: v4l2-ctl --list-formats-ext -d /dev/videoX
 
 [[stitch.cameras]]
 device = "/dev/video0"
 label = "front"
 input_format = "mjpeg"
 width = 640
-height = 480
+height = 360
 
 [[stitch.cameras]]
-device = "/dev/video4"
-label = "front-right"
+device = "/dev/video2"
+label = "right"
 input_format = "mjpeg"
 width = 640
-height = 480
+height = 360
 
+# Uncomment to add more cameras:
 # [[stitch.cameras]]
-# device = "/dev/video2"
-# label = "right"
-# input_format = "mjpeg"
-# width = 640
-# height = 480
-#
-# [[stitch.cameras]]
-# device = "/dev/video3"
+# device = "/dev/video4"
 # label = "rear"
 # input_format = "mjpeg"
 # width = 640
-# height = 480
-#
-# [[stitch.cameras]]
-# device = "/dev/video4"
-# label = "left"
-# input_format = "mjpeg"
-# width = 640
-# height = 480
+# height = 360

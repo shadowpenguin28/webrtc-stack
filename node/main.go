@@ -150,11 +150,17 @@ func handleSession(ctx context.Context, config Config, sigClient *signaling.Clie
 	if config.Stitch.Enabled && len(config.Stitch.Cameras) > 0 {
 		// Multi-camera stitched mode
 		stitchCfg := pipeline.StitchConfig{
-			CanvasWidth:  config.Stitch.CanvasWidth,
-			CanvasHeight: config.Stitch.CanvasHeight,
-			Encoder:      config.Stitch.Encoder,
-			FPS:          config.Video.FPS,
-			Bitrate:      config.Stitch.Bitrate,
+			CanvasWidth:     config.Stitch.CanvasWidth,
+			CanvasHeight:    config.Stitch.CanvasHeight,
+			Encoder:         config.Stitch.Encoder,
+			FPS:             config.Video.FPS,
+			Bitrate:         config.Stitch.Bitrate,
+			ThreadQueueSize: config.Stitch.ThreadQueueSize,
+			Preset:          config.Stitch.Preset,
+			Tune:            config.Stitch.Tune,
+			Profile:         config.Stitch.Profile,
+			MaxRate:         config.Stitch.MaxRate,
+			BufSize:         config.Stitch.BufSize,
 		}
 		for _, cam := range config.Stitch.Cameras {
 			stitchCfg.Cameras = append(stitchCfg.Cameras, pipeline.CameraInput{
@@ -169,7 +175,22 @@ func handleSession(ctx context.Context, config Config, sigClient *signaling.Clie
 		log.Printf("session: using stitched pipeline (%d cameras)", len(config.Stitch.Cameras))
 	} else {
 		// Single-camera mode
-		source = pipeline.NewCameraSource(config.FFmpeg.Arguments, config.Video.FPS)
+		camCfg := pipeline.CameraConfig{
+			Device:          config.FFmpeg.Device,
+			InputFormat:     config.FFmpeg.InputFormat,
+			CaptureWidth:    config.FFmpeg.CaptureWidth,
+			CaptureHeight:   config.FFmpeg.CaptureHeight,
+			Encoder:         config.FFmpeg.Encoder,
+			FPS:             config.Video.FPS,
+			Bitrate:         config.FFmpeg.Bitrate,
+			Preset:          config.FFmpeg.Preset,
+			Tune:            config.FFmpeg.Tune,
+			Profile:         config.FFmpeg.Profile,
+			MaxRate:         config.FFmpeg.MaxRate,
+			BufSize:         config.FFmpeg.BufSize,
+			ThreadQueueSize: config.FFmpeg.ThreadQueueSize,
+		}
+		source = pipeline.NewCameraSource(camCfg, config.Label)
 		log.Printf("session: using single-camera pipeline")
 	}
 

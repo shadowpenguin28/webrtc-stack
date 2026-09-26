@@ -20,12 +20,18 @@ type CameraInput struct {
 
 // StitchConfig holds all parameters needed to build a stitched video source.
 type StitchConfig struct {
-	Cameras      []CameraInput
-	CanvasWidth  int    // output width, e.g. 1920
-	CanvasHeight int    // output height, e.g. 1080
-	Encoder      string // "h264_v4l2m2m" or "libx264"
-	FPS          int
-	Bitrate      string // e.g. "2500k"
+	Cameras         []CameraInput
+	CanvasWidth     int    // output width, e.g. 1920
+	CanvasHeight    int    // output height, e.g. 1080
+	Encoder         string // "h264_v4l2m2m" or "libx264"
+	FPS             int
+	Bitrate         string // e.g. "2500k"
+	ThreadQueueSize int    // V4L2 read buffer depth per camera (default 512)
+	Preset          string // libx264 only: "ultrafast", "superfast", etc.
+	Tune            string // libx264 only: "zerolatency", "film", etc.
+	Profile         string // libx264 only: "baseline", "main", "high"
+	MaxRate         string // libx264 only: VBV max rate, e.g. "2000k"
+	BufSize         string // libx264 only: VBV buffer size, e.g. "150k"
 }
 
 // StitchedSource composites multiple camera feeds into a single 1080p
@@ -40,6 +46,10 @@ type StitchedSource struct {
 
 // NewStitchedSource creates a stitched video source that composites
 // all configured cameras into a single canvas.
+//
+// When CanvasWidth or CanvasHeight is 0, the canvas is auto-computed
+// from camera count and dimensions to maximise per-camera resolution
+// while avoiding unnecessary upscaling.
 func NewStitchedSource(config StitchConfig) *StitchedSource {
 	if config.FPS <= 0 {
 		config.FPS = 30
@@ -50,6 +60,20 @@ func NewStitchedSource(config StitchConfig) *StitchedSource {
 	if config.Encoder == "" {
 		config.Encoder = "h264_v4l2m2m"
 	}
+	if config.ThreadQueueSize <= 0 {
+		config.ThreadQueueSize = 512
+	}
+
+	// Auto-compute canvas size when not explicitly configured.
+	// This maximises per-camera resolution for fewer cameras (less
+	// CPU/USB load) and avoids wasteful upscaling.
+	if config.CanvasWidth <= 0 || config.CanvasHeight <= 0 {
+		cols, rows := gridLayout(len(config.Cameras))
+		config.CanvasWidth, config.CanvasHeight = optimalCanvas(config.Cameras, cols, rows)
+		log.Printf("pipeline: auto-computed canvas %dx%d for %d cameras (%dx%d grid)",
+			config.CanvasWidth, config.CanvasHeight, len(config.Cameras), cols, rows)
+	}
+
 	return &StitchedSource{
 		config: config,
 		frames: make(chan AccessUnit, 4),
@@ -88,8 +112,9 @@ func (s *StitchedSource) Start(ctx context.Context) error {
 		return fmt.Errorf("ffmpeg start: %w", err)
 	}
 
-	log.Printf("pipeline: stitched FFmpeg started (pid=%d) cameras=%d encoder=%s",
-		s.cmd.Process.Pid, len(s.config.Cameras), s.config.Encoder)
+	log.Printf("pipeline: stitched FFmpeg started (pid=%d) cameras=%d encoder=%s canvas=%dx%d",
+		s.cmd.Process.Pid, len(s.config.Cameras), s.config.Encoder,
+		s.config.CanvasWidth, s.config.CanvasHeight)
 
 	go LogStderr(stderr, "pipeline: stitch-ffmpeg")
 
@@ -135,17 +160,51 @@ func gridLayout(numCameras int) (cols, rows int) {
 	}
 }
 
+// optimalCanvas computes output canvas dimensions that maximise per-camera
+// resolution while avoiding unnecessary upscaling. The principle is:
+// fewer cameras → each camera gets its full native resolution as the cell
+// size, so the canvas is just cols×cam_w by rows×cam_h with zero scaling.
+//
+// Layout and resulting canvas (for 640×480 cameras):
+//
+//	1 camera:    1×1 → 640×480    (native, no scaling)
+//	2 cameras:   2×1 → 1280×480   (native, no scaling)
+//	3-4 cameras: 2×2 → 1280×960   (native, no scaling)
+//	5-6 cameras: 3×2 → 1920×1080  (minimal 60px vertical pad per cell)
+func optimalCanvas(cameras []CameraInput, cols, rows int) (canvasW, canvasH int) {
+	// Find the maximum camera dimensions across all inputs.
+	maxW, maxH := 0, 0
+	for _, cam := range cameras {
+		if cam.Width > maxW {
+			maxW = cam.Width
+		}
+		if cam.Height > maxH {
+			maxH = cam.Height
+		}
+	}
+
+	// Base canvas: exact multiples of camera dimensions → zero scaling.
+	canvasW = cols * maxW
+	canvasH = rows * maxH
+
+	// For 3×2 grids (5-6 cameras), use a 1080p canvas.
+	// Width 3×640 = 1920 is already correct; height 2×480 = 960 is
+	// rounded up to 1080 for a standard output resolution. Each cell
+	// becomes 640×540 with just 60px of black padding vertically.
+	if cols >= 3 && rows >= 2 {
+		canvasW = 1920
+		canvasH = 1080
+	}
+
+	return canvasW, canvasH
+}
+
 // buildFFmpegArgs constructs the complete FFmpeg argument list for
 // stitching all cameras into an automatically-tiled grid on the canvas.
 //
-// The grid adapts to camera count:
-//
-//	1 cam:  1×1  → each cell 1920×1080
-//	2 cams: 2×1  → each cell 960×1080
-//	3 cams: 2×2  → each cell 960×540 (1 empty)
-//	4 cams: 2×2  → each cell 960×540
-//	5 cams: 3×2  → each cell 640×540 (1 empty)
-//	6 cams: 3×2  → each cell 640×540
+// Cell sizes are derived from the (possibly auto-computed) canvas
+// dimensions divided by the grid layout, so with auto-canvas the cells
+// match or closely match the camera capture resolution — no upscaling.
 func (s *StitchedSource) buildFFmpegArgs() []string {
 	var args []string
 
@@ -156,17 +215,30 @@ func (s *StitchedSource) buildFFmpegArgs() []string {
 
 	fps := strconv.Itoa(s.config.FPS)
 
+	queueSize := strconv.Itoa(s.config.ThreadQueueSize)
+
+	// Over-allocate threads (8) for the filter graph (decode + scale + xstack) 
+	// to maximize resource usage since the Pi is dedicated to this task.
+	// Crucially, use -copyts so FFmpeg does not independently reset each camera's
+	// start time to 0. This preserves the absolute V4L2 hardware timestamps,
+	// allowing xstack to perfectly synchronize them.
+	args = append(args, "-threads", "8", "-filter_threads", "8", "-copyts")
+
 	// Add inputs for each camera
 	for _, cam := range s.config.Cameras {
 		w := strconv.Itoa(cam.Width)
 		h := strconv.Itoa(cam.Height)
 		args = append(args,
+			"-probesize", "32", // Don't buffer seconds of data before starting
+			"-analyzeduration", "0", // Start immediately
+			"-thread_queue_size", queueSize, // Decouple V4L2 reading from the xstack filter processing
 			"-f", "v4l2",
 			"-input_format", cam.InputFormat,
 			"-framerate", fps,
 			"-video_size", w+"x"+h,
-			"-fflags", "nobuffer", // Prevent internal input buffering
-			"-flags", "low_delay", // Optimize for low-latency live streams
+			"-fflags", "+discardcorrupt", // Silently discard corrupt MJPEG frames instead of stalling
+			"-flags", "low_delay",
+			"-err_detect", "ignore_err", // Tolerate MJPEG decode errors without blocking
 			"-i", cam.Device,
 		)
 	}
@@ -177,20 +249,41 @@ func (s *StitchedSource) buildFFmpegArgs() []string {
 
 	// Encoder settings
 	if s.config.Encoder == "libx264" || s.config.Encoder == "h264" {
+		preset := s.config.Preset
+		if preset == "" {
+			preset = "ultrafast"
+		}
+		tune := s.config.Tune
+		if tune == "" {
+			tune = "zerolatency"
+		}
+		profile := s.config.Profile
+		if profile == "" {
+			profile = "baseline"
+		}
+		maxRate := s.config.MaxRate
+		if maxRate == "" {
+			maxRate = s.config.Bitrate
+		}
+		bufSize := s.config.BufSize
+		if bufSize == "" {
+			bufSize = "150k"
+		}
 		args = append(args,
 			"-c:v", s.config.Encoder,
-			"-preset", "ultrafast",
-			"-tune", "zerolatency",
-			"-profile:v", "baseline",
+			"-preset", preset,
+			"-tune", tune,
+			"-profile:v", profile,
 			"-level", "4.1",
 			"-pix_fmt", "yuv420p",
 			"-x264-params", "repeat-headers=1:keyint="+fps+":min-keyint="+fps+":aud=1:slices="+strconv.Itoa(rows)+":deblock=-1,-1",
 			"-b:v", s.config.Bitrate,
-			"-maxrate", s.config.Bitrate,
-			"-bufsize", "150k", // Extremely strict CBR buffer (max ~18KB burst)
+			"-maxrate", maxRate,
+			"-bufsize", bufSize,
 		)
 	} else {
-		// Other encoders (h264, h264_v4l2m2m, etc.)
+		// Hardware encoders (h264_v4l2m2m, etc.)
+		// These ignore preset/tune/profile — only bitrate and GOP size matter.
 		args = append(args,
 			"-c:v", s.config.Encoder,
 			"-b:v", s.config.Bitrate,
@@ -199,10 +292,11 @@ func (s *StitchedSource) buildFFmpegArgs() []string {
 		)
 	}
 
-	// Use dump_extra bitstream filter to repeat SPS/PPS headers at every keyframe.
-	// This is required for WebRTC clients connecting mid-stream, especially
-	// when using hardware encoders that don't support -repeat_headers natively.
-	args = append(args, "-bsf:v", "dump_extra=freq=keyframe")
+	// Use dump_extra to repeat SPS/PPS headers at every keyframe for WebRTC mid-stream joins.
+	// Use h264_metadata=aud=insert to ensure EVERY frame has an Access Unit Delimiter (AUD).
+	// Without AUDs, ReadAccessUnits fails to detect frame boundaries from hardware encoders
+	// and incorrectly groups 30 frames into a single giant 1-fps chunk!
+	args = append(args, "-bsf:v", "dump_extra=freq=keyframe,h264_metadata=aud=insert")
 
 	args = append(args, "-f", "h264", "pipe:1")
 
@@ -218,7 +312,10 @@ func (s *StitchedSource) buildFilterComplex(numCameras, cols, rows, cellW, cellH
 
 	// Scale each camera to fit the cell while preserving aspect ratio,
 	// then pad with black to center it within the cell.
-	// E.g. 640×480 (4:3) into 960×540 (16:9) → scales to 720×540, pads to 960×540
+	// We pass the raw V4L2 timestamps directly to xstack. Because V4L2 uses the 
+	// system's CLOCK_MONOTONIC, all cameras naturally share the same absolute timeline.
+	// This ensures xstack stitches them in perfect real-time sync (no leading/lagging),
+	// automatically waiting for or dropping frames if a camera falls behind.
 	for i := 0; i < numCameras; i++ {
 		parts = append(parts,
 			fmt.Sprintf("[%d:v]scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2:black[s%d]",
@@ -265,4 +362,3 @@ func (s *StitchedSource) buildFilterComplex(numCameras, cols, rows, cellW, cellH
 
 	return strings.Join(parts, ";")
 }
-
